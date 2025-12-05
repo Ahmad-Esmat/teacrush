@@ -26,4 +26,6 @@ VP9 is *excruciatingly* slow to encode but widely supported and has way better q
 
 HEVC is quite optimized on the CPU and even more so on the GPU, with minute long videos taking seconds to encode. However, most browsers will not play it (except Electon apps, like Discord, but remember that Discord can also be used in a browser).
 
-So if you have time, it is always better to use VP9. Otherwise go with H264 for compatibility or HEVC for quality.
+So if you have time, **it is always better to use VP9**. Otherwise go with H264 for compatibility or HEVC for quality. If your VP9 encoder gets stuck at 0% on the analysis stage, that is okay, it will get unstuck after a bit, you just need to wait.
+
+GPU encoding will always be worse than software (CPU) encoding in quality, since none of the major GPU encoders support two-pass encoding (and generally lack in quality compared to software encoders). **You should only use GPU encoding if you have generous target size and a long video.**
