@@ -119,6 +119,9 @@ type model struct {
 	currentLog   string
 	percent      float64
 	outputFile   string
+
+	suggestions   []string
+	suggestionIdx int
 }
 
 func initialModel() model {
@@ -169,6 +172,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch m.state {
 		case stateInputFile:
+			if msg.Type == tea.KeyTab {
+				input := m.textInput.Value()
+
+				if len(m.suggestions) > 0 && input == m.suggestions[m.suggestionIdx] {
+					m.suggestionIdx = (m.suggestionIdx + 1) % len(m.suggestions)
+				} else {
+					m.suggestions = findMatches(input)
+					m.suggestionIdx = 0
+				}
+
+				if len(m.suggestions) > 0 {
+					choice := m.suggestions[m.suggestionIdx]
+					m.textInput.SetValue(choice)
+					m.textInput.SetCursor(len(choice))
+				}
+				return m, nil
+			}
+
 			if msg.Type == tea.KeyEnter {
 				path := cleanPath(m.textInput.Value())
 				if _, err := os.Stat(path); err != nil {
@@ -536,6 +557,35 @@ func runFFmpeg(args []string, ch chan<- progressMsg, totalDuration float64, pref
 
 func cleanPath(path string) string {
 	return strings.Trim(strings.TrimSpace(path), "\"'")
+}
+
+func findMatches(input string) []string {
+	dir, file := filepath.Split(input)
+	if dir == "" {
+		dir = "."
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+
+	var matches []string
+	for _, e := range entries {
+		if strings.HasPrefix(strings.ToLower(e.Name()), strings.ToLower(file)) {
+			fullPath := filepath.Join(dir, e.Name())
+
+			if dir == "." {
+				fullPath = e.Name()
+			}
+			if e.IsDir() {
+				fullPath += string(os.PathSeparator)
+			}
+
+			matches = append(matches, fullPath)
+		}
+	}
+	return matches
 }
 
 type FFProbeOutput struct {
