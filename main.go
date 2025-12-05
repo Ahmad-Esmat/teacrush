@@ -101,6 +101,7 @@ type progressMsg struct {
 
 type workDoneMsg struct {
 	outputFile string
+	finalSize  string
 	err        error
 }
 
@@ -119,6 +120,7 @@ type model struct {
 	currentLog   string
 	percent      float64
 	outputFile   string
+	finalSize    string
 
 	suggestions   []string
 	suggestionIdx int
@@ -271,6 +273,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.state = stateDone
 			m.outputFile = msg.outputFile
+			m.finalSize = msg.finalSize
 		}
 		return m, tea.Quit
 
@@ -355,6 +358,7 @@ func (m model) View() string {
 	case stateDone:
 		s.WriteString(doneStyle.Render("Success!"))
 		s.WriteString(fmt.Sprintf("\n\nSaved to:\n%s", m.outputFile))
+		s.WriteString(fmt.Sprintf("\n%s", m.finalSize))
 
 	case stateError:
 		s.WriteString(errStyle.Render("Failed."))
@@ -493,7 +497,14 @@ func startEncoding(inputFile string, targetMB float64, hw hwType, codecCfg codec
 			}
 		}
 
-		return workDoneMsg{outputFile: outputFile, err: nil}
+		fi, err := os.Stat(outputFile)
+		sizeStr := "Unknown"
+		if err == nil {
+			mb := float64(fi.Size()) / 1024 / 1024
+			sizeStr = fmt.Sprintf("%.2f MB", mb)
+		}
+
+		return workDoneMsg{outputFile: outputFile, finalSize: sizeStr, err: nil}
 	}
 }
 
