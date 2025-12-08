@@ -45,6 +45,8 @@ type state int
 const (
 	stateInputFile state = iota
 	stateInputSize
+	stateInputRes
+	stateGifFPS
 	stateSelectHW
 	stateSelectCodec
 	stateProcessing
@@ -111,8 +113,12 @@ type model struct {
 	spinner   spinner.Model
 	err       error
 
+	isGifMode bool
+
 	filePath      string
 	targetSizeMB  float64
+	targetRes     string
+	targetFPS     string // empty = real
 	selectedHW    int
 	selectedCodec int
 
@@ -126,7 +132,7 @@ type model struct {
 	suggestionIdx int
 }
 
-func initialModel() model {
+func initialModel(gifMode bool) model {
 	ti := textinput.New()
 	ti.CharLimit = 1000
 	ti.Width = 60
@@ -140,19 +146,24 @@ func initialModel() model {
 		state:      stateInputFile,
 		spinner:    s,
 		selectedHW: 0,
+		isGifMode:  gifMode,
 	}
 
-	if len(os.Args) > 1 {
-		argPath := cleanPath(os.Args[1])
-		if _, err := os.Stat(argPath); err == nil {
-			m.filePath = argPath
+	args := os.Args[1:]
+	for _, arg := range args {
+		if arg == "-gif" {
+			continue
+		}
+		clean := cleanPath(arg)
+		if _, err := os.Stat(clean); err == nil {
+			m.filePath = clean
 			m.state = stateInputSize
 			ti.Placeholder = "e.g. 10 (for 10MB)"
-		} else {
-			ti.Placeholder = "Drag & Drop video here..."
 		}
-	} else {
-		ti.Placeholder = "Drag & Drop video here..."
+	}
+
+	if m.filePath == "" {
+		ti.Placeholder = "Drag & Drop or enter path..."
 	}
 
 	m.textInput = ti
@@ -176,14 +187,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case stateInputFile:
 			if msg.Type == tea.KeyTab {
 				input := m.textInput.Value()
-
 				if len(m.suggestions) > 0 && input == m.suggestions[m.suggestionIdx] {
 					m.suggestionIdx = (m.suggestionIdx + 1) % len(m.suggestions)
 				} else {
 					m.suggestions = findMatches(input)
 					m.suggestionIdx = 0
 				}
-
 				if len(m.suggestions) > 0 {
 					choice := m.suggestions[m.suggestionIdx]
 					m.textInput.SetValue(choice)
@@ -207,14 +216,50 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case stateInputSize:
 			if msg.Type == tea.KeyEnter {
-				size, err := strconv.ParseFloat(m.textInput.Value(), 64)
+				val := m.textInput.Value()
+				if val == "" {
+					val = "8"
+				}
+				size, err := strconv.ParseFloat(val, 64)
 				if err != nil || size <= 0 {
 					m.err = fmt.Errorf("invalid size")
 				} else {
 					m.targetSizeMB = size
-					m.state = stateSelectHW
+					m.state = stateInputRes
+					m.textInput.Reset()
+					m.textInput.Placeholder = "Enter=Original, 2=Half-size, or e.g. 1280x720"
 					m.err = nil
 				}
+			}
+
+		case stateInputRes:
+			if msg.Type == tea.KeyEnter {
+				m.targetRes = m.textInput.Value()
+				m.textInput.Reset()
+
+				if m.isGifMode {
+					m.state = stateGifFPS
+					m.textInput.Placeholder = "Enter=Original, or e.g. 15"
+				} else {
+					m.state = stateSelectHW
+					m.textInput.Blur()
+				}
+				m.err = nil
+			}
+
+		case stateGifFPS:
+			if msg.Type == tea.KeyEnter {
+				m.targetFPS = m.textInput.Value()
+				m.textInput.Blur()
+
+				m.state = stateProcessing
+				m.progressChan = make(chan progressMsg)
+				codecCfg := codecInfo{Name: "GIF", Ext: ".gif"}
+				return m, tea.Batch(
+					m.spinner.Tick,
+					startEncoding(m.filePath, m.targetSizeMB, m.targetRes, m.targetFPS, hwCPU, codecCfg, m.progressChan, true),
+					waitForProgress(m.progressChan),
+				)
 			}
 
 		case stateSelectHW:
@@ -253,7 +298,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				return m, tea.Batch(
 					m.spinner.Tick,
-					startEncoding(m.filePath, m.targetSizeMB, hw, codecCfg, m.progressChan),
+					startEncoding(m.filePath, m.targetSizeMB, m.targetRes, "", hw, codecCfg, m.progressChan, false),
 					waitForProgress(m.progressChan),
 				)
 			}
@@ -284,7 +329,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if m.state == stateInputFile || m.state == stateInputSize {
+	if m.state == stateInputFile || m.state == stateInputSize || m.state == stateInputRes || m.state == stateGifFPS {
 		m.textInput, cmd = m.textInput.Update(msg)
 	}
 
@@ -295,6 +340,9 @@ func (m model) View() string {
 	var s strings.Builder
 
 	s.WriteString(titleStyle.Render(" Teacrush "))
+	if m.isGifMode {
+		s.WriteString(" (GIF Mode)")
+	}
 	s.WriteString("\n\n")
 
 	if m.err != nil {
@@ -314,8 +362,21 @@ func (m model) View() string {
 		s.WriteString("\nMax MB (Audio+Video):\n\n")
 		s.WriteString(m.textInput.View())
 
+	case stateInputRes:
+		s.WriteString(stepStyle.Render("3. Target Resolution"))
+		s.WriteString("\nLeave empty for original.")
+		s.WriteString("\nType '2' for half size (1/2).")
+		s.WriteString("\nType '1280x720' for fixed size.\n\n")
+		s.WriteString(m.textInput.View())
+
+	case stateGifFPS:
+		s.WriteString(stepStyle.Render("4. GIF Framerate"))
+		s.WriteString("\nLeave empty for original FPS.")
+		s.WriteString("\nEnter a number (e.g. 15) to set an FPS limit.\n\n")
+		s.WriteString(m.textInput.View())
+
 	case stateSelectHW:
-		s.WriteString(stepStyle.Render("3. Select Hardware"))
+		s.WriteString(stepStyle.Render("4. Select Hardware"))
 		s.WriteString(fmt.Sprintf("\nTarget: %.2f MB\n\n", m.targetSizeMB))
 		for i, hw := range hardwareOptions {
 			cursor := "  "
@@ -328,7 +389,7 @@ func (m model) View() string {
 		}
 
 	case stateSelectCodec:
-		s.WriteString(stepStyle.Render("4. Select Codec"))
+		s.WriteString(stepStyle.Render("5. Select Codec"))
 		hw := hardwareOptions[m.selectedHW]
 		s.WriteString(fmt.Sprintf("\nHardware: %s\n\n", hw))
 
@@ -344,7 +405,11 @@ func (m model) View() string {
 		}
 
 	case stateProcessing:
-		s.WriteString(stepStyle.Render("Compressing..."))
+		mode := "Compressing"
+		if m.isGifMode {
+			mode = "Creating GIF"
+		}
+		s.WriteString(stepStyle.Render(mode + "..."))
 		s.WriteString("\n\n")
 
 		width := 40
@@ -376,7 +441,22 @@ func waitForProgress(sub <-chan progressMsg) tea.Cmd {
 	}
 }
 
-func startEncoding(inputFile string, targetMB float64, hw hwType, codecCfg codecInfo, progressChan chan progressMsg) tea.Cmd {
+func buildScaleFilter(input string) string {
+	input = strings.TrimSpace(input)
+	if input == "" || input == "1" {
+		return ""
+	}
+	if div, err := strconv.ParseFloat(input, 64); err == nil && div > 0 {
+		return fmt.Sprintf("scale=trunc((iw/%g)/2)*2:trunc((ih/%g)/2)*2", div, div)
+	}
+	if strings.Contains(input, "x") || strings.Contains(input, ":") {
+		formatted := strings.ReplaceAll(input, "x", ":")
+		return fmt.Sprintf("scale=%s", formatted)
+	}
+	return ""
+}
+
+func startEncoding(inputFile string, targetMB float64, resInput string, fpsInput string, hw hwType, codecCfg codecInfo, progressChan chan progressMsg, isGif bool) tea.Cmd {
 	return func() tea.Msg {
 		defer close(progressChan)
 
@@ -387,6 +467,71 @@ func startEncoding(inputFile string, targetMB float64, hw hwType, codecCfg codec
 		}
 
 		duration, _ := strconv.ParseFloat(info.Format.Duration, 64)
+
+		dir := filepath.Dir(inputFile)
+		name := strings.TrimSuffix(filepath.Base(inputFile), filepath.Ext(inputFile))
+		outputFile := filepath.Join(dir, fmt.Sprintf("%s_compressed%s", name, codecCfg.Ext))
+
+		scaleFilter := buildScaleFilter(resInput)
+
+		vfFilters := []string{}
+		if scaleFilter != "" {
+			vfFilters = append(vfFilters, scaleFilter)
+		}
+		vfFilters = append(vfFilters, "mpdecimate") // remove duplicate frames
+
+		vfString := strings.Join(vfFilters, ",")
+
+		// gif mode
+		if isGif {
+			gifVf := []string{}
+			if scaleFilter != "" {
+				gifVf = append(gifVf, scaleFilter)
+			}
+			gifVf = append(gifVf, "mpdecimate")
+
+			if fpsInput != "" {
+				gifVf = append(gifVf, fmt.Sprintf("fps=%s", fpsInput))
+			}
+
+			gifVfStr := strings.Join(gifVf, ",")
+
+			paletteFile := filepath.Join(os.TempDir(), fmt.Sprintf("palette_%d.png", time.Now().UnixNano()))
+			defer os.Remove(paletteFile)
+
+			progressChan <- progressMsg{line: "Generating Palette...", progress: 0.1}
+
+			palFilter := gifVfStr
+			if palFilter != "" {
+				palFilter += ","
+			}
+			palFilter += "palettegen"
+			palArgs := []string{"-y", "-i", inputFile, "-vf", palFilter, paletteFile}
+			if err := runFFmpeg(palArgs, progressChan, duration, "GIF Palette"); err != nil {
+				return workDoneMsg{err: err}
+			}
+
+			progressChan <- progressMsg{line: "Encoding GIF...", progress: 0.5}
+
+			filterComplex := fmt.Sprintf("[0:v]%s[x];[x][1:v]paletteuse", gifVfStr)
+			if gifVfStr == "" {
+				filterComplex = "[0:v]fifo[x];[x][1:v]paletteuse"
+			}
+
+			encArgs := []string{
+				"-y", "-i", inputFile, "-i", paletteFile,
+				"-lavfi", filterComplex,
+				outputFile,
+			}
+
+			if err := runFFmpeg(encArgs, progressChan, duration, "GIF Encode"); err != nil {
+				return workDoneMsg{err: err}
+			}
+
+			return finishWork(outputFile)
+		}
+
+		// video mode
 		hasAudio := false
 		for _, s := range info.Streams {
 			if s.CodecType == "audio" {
@@ -400,18 +545,12 @@ func startEncoding(inputFile string, targetMB float64, hw hwType, codecCfg codec
 		if hasAudio {
 			audioRate = 128 * 1024
 		}
-
 		totalRate := targetBits / duration
 		videoRate := (totalRate - audioRate) * 0.95
 		if videoRate < 50*1024 {
 			videoRate = 50 * 1024
 		}
-
 		videoKBit := int(videoRate / 1024)
-
-		dir := filepath.Dir(inputFile)
-		name := strings.TrimSuffix(filepath.Base(inputFile), filepath.Ext(inputFile))
-		outputFile := filepath.Join(dir, fmt.Sprintf("%s_compressed%s", name, codecCfg.Ext))
 
 		isCPU := hw == hwCPU
 
@@ -424,6 +563,11 @@ func startEncoding(inputFile string, targetMB float64, hw hwType, codecCfg codec
 			}
 		} else {
 			audioArgs = []string{"-an"}
+		}
+
+		filterArgs := []string{}
+		if vfString != "" {
+			filterArgs = []string{"-vf", vfString}
 		}
 
 		if isCPU {
@@ -441,13 +585,14 @@ func startEncoding(inputFile string, targetMB float64, hw hwType, codecCfg codec
 				extraArgs = []string{"-preset", "medium"}
 			}
 
-			// pass 1
 			nullOut := "/dev/null"
 			if runtime.GOOS == "windows" {
 				nullOut = "NUL"
 			}
 
+			// pass 1
 			p1 := []string{"-y", "-i", inputFile, "-c:v", codecCfg.FFmpegLib, "-b:v", fmt.Sprintf("%dk", videoKBit), "-pass", "1", "-passlogfile", passLog, "-an"}
+			p1 = append(p1, filterArgs...)
 			p1 = append(p1, extraArgs...)
 			p1 = append(p1, "-f", "null", nullOut)
 
@@ -457,6 +602,7 @@ func startEncoding(inputFile string, targetMB float64, hw hwType, codecCfg codec
 
 			// pass 2
 			p2 := []string{"-y", "-i", inputFile, "-c:v", codecCfg.FFmpegLib, "-b:v", fmt.Sprintf("%dk", videoKBit), "-pass", "2", "-passlogfile", passLog}
+			p2 = append(p2, filterArgs...)
 			p2 = append(p2, extraArgs...)
 			p2 = append(p2, audioArgs...)
 			p2 = append(p2, outputFile)
@@ -467,10 +613,9 @@ func startEncoding(inputFile string, targetMB float64, hw hwType, codecCfg codec
 			_ = os.Remove(passLog + "-0.log")
 			_ = os.Remove(passLog + ".log")
 			_ = os.Remove(passLog + "-0.log.mbtree")
-		} else {
-			// gpu (cbr)
-			extraArgs := []string{}
 
+		} else {
+			extraArgs := []string{}
 			if strings.Contains(codecCfg.FFmpegLib, "nvenc") {
 				extraArgs = []string{"-preset", "p7", "-rc", "vbr", "-cq", "0"}
 			} else if strings.Contains(codecCfg.FFmpegLib, "amf") {
@@ -488,6 +633,7 @@ func startEncoding(inputFile string, targetMB float64, hw hwType, codecCfg codec
 				"-maxrate", fmt.Sprintf("%dk", videoKBit),
 				"-bufsize", fmt.Sprintf("%dk", videoKBit*2),
 			}
+			cmdArgs = append(cmdArgs, filterArgs...)
 			cmdArgs = append(cmdArgs, extraArgs...)
 			cmdArgs = append(cmdArgs, audioArgs...)
 			cmdArgs = append(cmdArgs, outputFile)
@@ -497,15 +643,18 @@ func startEncoding(inputFile string, targetMB float64, hw hwType, codecCfg codec
 			}
 		}
 
-		fi, err := os.Stat(outputFile)
-		sizeStr := "Unknown"
-		if err == nil {
-			mb := float64(fi.Size()) / 1024 / 1024
-			sizeStr = fmt.Sprintf("%.2f MB", mb)
-		}
-
-		return workDoneMsg{outputFile: outputFile, finalSize: sizeStr, err: nil}
+		return finishWork(outputFile)
 	}
+}
+
+func finishWork(path string) workDoneMsg {
+	fi, err := os.Stat(path)
+	sizeStr := "Unknown"
+	if err == nil {
+		mb := float64(fi.Size()) / 1024 / 1024
+		sizeStr = fmt.Sprintf("%.2f MB", mb)
+	}
+	return workDoneMsg{outputFile: path, finalSize: sizeStr, err: nil}
 }
 
 func runFFmpeg(args []string, ch chan<- progressMsg, totalDuration float64, prefix string) error {
@@ -548,7 +697,6 @@ func runFFmpeg(args []string, ch chan<- progressMsg, totalDuration float64, pref
 				if remaining < 0 {
 					remaining = 0
 				}
-
 				remDur := time.Duration(remaining) * time.Second
 				etaStr = fmt.Sprintf("eta %02d:%02d", int(remDur.Minutes()), int(remDur.Seconds())%60)
 			}
@@ -575,24 +723,20 @@ func findMatches(input string) []string {
 	if dir == "" {
 		dir = "."
 	}
-
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
 	}
-
 	var matches []string
 	for _, e := range entries {
 		if strings.HasPrefix(strings.ToLower(e.Name()), strings.ToLower(file)) {
 			fullPath := filepath.Join(dir, e.Name())
-
 			if dir == "." {
 				fullPath = e.Name()
 			}
 			if e.IsDir() {
 				fullPath += string(os.PathSeparator)
 			}
-
 			matches = append(matches, fullPath)
 		}
 	}
@@ -618,8 +762,28 @@ func probeFile(path string) (*FFProbeOutput, error) {
 	return &info, nil
 }
 
+func printHelp() {
+	fmt.Println(titleStyle.Render(" Teacrush "))
+	fmt.Println("\nUsage:")
+	fmt.Println("  teacrush [input_file] [flags]")
+	fmt.Println("\nFlags:")
+	fmt.Println("  -gif           Encode to GIF")
+	fmt.Println("  -h, --help, ?  Show this help message")
+}
+
 func main() {
-	p := tea.NewProgram(initialModel())
+	isGif := false
+	for _, arg := range os.Args {
+		if arg == "-h" || arg == "--help" || arg == "?" {
+			printHelp()
+			os.Exit(0)
+		}
+		if arg == "-gif" {
+			isGif = true
+		}
+	}
+
+	p := tea.NewProgram(initialModel(isGif))
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
