@@ -25,10 +25,10 @@ $ teacrush -h
 Teacrush
 
 Usage:
-teacrush [input_file] [flags]
+  teacrush [input_file] [flags]
 
 Flags:
--gif                Encode to GIF
--trim [start] [end] Trim video (e.g. -trim 00:01:00 00:02:00 or -trim 1s 5s)
--h, --help, ?       Show this help message
+  -gif                Encode to GIF
+  -trim [start] [end] Trim video (e.g. -trim 00:01:00 00:02:00 or -trim 1s 5s)
+  -h, --help, ?       Show this help message
 ```
