@@ -214,8 +214,14 @@ func initialModel(mode outputMode) model {
 		if fi, err := os.Stat(clean); err == nil {
 			m.filePath = clean
 			m.originalSize = float64(fi.Size()) / 1024 / 1024
-			m.state = stateInputSize
-			ti.Placeholder = "e.g. 10 (for 10MB)"
+
+			if m.outputMode == modeGIF || m.outputMode == modeAPNG {
+				m.state = stateInputRes
+				ti.Placeholder = "Enter=Original, 2=Half-size, or e.g. 1280x720"
+			} else {
+				m.state = stateInputSize
+				ti.Placeholder = "e.g. 10 (for 10MB)"
+			}
 		}
 	}
 
@@ -265,9 +271,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					m.filePath = path
 					m.originalSize = float64(fi.Size()) / 1024 / 1024
-					m.state = stateInputSize
-					m.textInput.Reset()
-					m.textInput.Placeholder = "e.g. 10 (for 10MB)"
+
+					if m.outputMode == modeGIF || m.outputMode == modeAPNG {
+						m.state = stateInputRes
+						m.textInput.Reset()
+						m.textInput.Placeholder = "Enter=Original, 2=Half-size, or e.g. 1280x720"
+					} else {
+						m.state = stateInputSize
+						m.textInput.Reset()
+						m.textInput.Placeholder = "e.g. 10 (for 10MB)"
+					}
 					m.err = nil
 				}
 			}
@@ -836,7 +849,7 @@ func startEncoding(inputFile string, targetMB float64, resInput string, fpsInput
 			if vfString != "" {
 				encArgs = append(encArgs, "-vf", vfString)
 			}
-			encArgs = append(encArgs, "-c:v", "apng", "-plays", "0")
+			encArgs = append(encArgs, "-c:v", "apng", "-plays", "0", "-f", "apng")
 			encArgs = append(encArgs, formatArgs...)
 			encArgs = append(encArgs, outputFile)
 			fullCmd := fmt.Sprintf("ffmpeg %s", strings.Join(encArgs, " "))
