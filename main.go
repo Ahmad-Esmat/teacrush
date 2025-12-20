@@ -56,6 +56,7 @@ const (
 	stateGifFPS
 	stateSelectHW
 	stateSelectCodec
+	stateSelectCRF
 	stateSelectQuality
 	stateProcessing
 	stateDone
@@ -129,6 +130,7 @@ type model struct {
 	customOut string
 
 	filePath      string
+	originalSize  float64
 	targetSizeMB  float64
 	targetRes     string
 	targetFPS     string // empty = real
@@ -136,6 +138,7 @@ type model struct {
 	trimEnd       string
 	selectedHW    int
 	selectedCodec int
+	crfLevel      int // 0 to 10
 	qualityLevel  int // 0 to 4
 
 	progressChan chan progressMsg
@@ -163,7 +166,8 @@ func initialModel(gifMode bool) model {
 		state:        stateInputFile,
 		spinner:      s,
 		selectedHW:   0,
-		qualityLevel: 2, // balanced
+		crfLevel:     5, // medium/balanced quality
+		qualityLevel: 2, // balanced speed
 		isGifMode:    gifMode,
 	}
 
@@ -198,8 +202,9 @@ func initialModel(gifMode bool) model {
 		}
 
 		clean := cleanPath(arg)
-		if _, err := os.Stat(clean); err == nil {
+		if fi, err := os.Stat(clean); err == nil {
 			m.filePath = clean
+			m.originalSize = float64(fi.Size()) / 1024 / 1024
 			m.state = stateInputSize
 			ti.Placeholder = "e.g. 10 (for 10MB)"
 		}
@@ -246,10 +251,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			if msg.Type == tea.KeyEnter {
 				path := cleanPath(m.textInput.Value())
-				if _, err := os.Stat(path); err != nil {
+				if fi, err := os.Stat(path); err != nil {
 					m.err = fmt.Errorf("file not found: %s", path)
 				} else {
 					m.filePath = path
+					m.originalSize = float64(fi.Size()) / 1024 / 1024
 					m.state = stateInputSize
 					m.textInput.Reset()
 					m.textInput.Placeholder = "e.g. 10 (for 10MB)"
@@ -261,17 +267,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.Type == tea.KeyEnter {
 				val := m.textInput.Value()
 				if val == "" {
-					val = "8"
-				}
-				size, err := strconv.ParseFloat(val, 64)
-				if err != nil || size <= 0 {
-					m.err = fmt.Errorf("invalid size")
-				} else {
-					m.targetSizeMB = size
+					m.targetSizeMB = 0 // will use CRF mode
 					m.state = stateInputRes
 					m.textInput.Reset()
 					m.textInput.Placeholder = "Enter=Original, 2=Half-size, or e.g. 1280x720"
 					m.err = nil
+				} else {
+					size, err := strconv.ParseFloat(val, 64)
+					if err != nil || size <= 0 {
+						m.err = fmt.Errorf("invalid size")
+					} else {
+						m.targetSizeMB = size
+						m.state = stateInputRes
+						m.textInput.Reset()
+						m.textInput.Placeholder = "Enter=Original, 2=Half-size, or e.g. 1280x720"
+						m.err = nil
+					}
 				}
 			}
 
@@ -300,7 +311,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				codecCfg := codecInfo{Name: "GIF", Ext: ".gif"}
 				return m, tea.Batch(
 					m.spinner.Tick,
-					startEncoding(m.filePath, m.targetSizeMB, m.targetRes, m.targetFPS, m.trimStart, m.trimEnd, m.customOut, hwCPU, codecCfg, m.progressChan, true, m.qualityLevel),
+					startEncoding(m.filePath, m.targetSizeMB, m.targetRes, m.targetFPS, m.trimStart, m.trimEnd, m.customOut, hwCPU, codecCfg, m.progressChan, true, m.qualityLevel, m.crfLevel),
 					waitForProgress(m.progressChan),
 				)
 			}
@@ -334,6 +345,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selectedCodec++
 				}
 			case "enter":
+				if m.targetSizeMB <= 0 {
+					m.state = stateSelectCRF
+				} else {
+					m.state = stateSelectQuality
+				}
+			}
+
+		case stateSelectCRF:
+			switch msg.String() {
+			case "left", "h", "a":
+				if m.crfLevel > 0 {
+					m.crfLevel--
+				}
+			case "right", "l", "d":
+				if m.crfLevel < 10 {
+					m.crfLevel++
+				}
+			case "enter":
 				m.state = stateSelectQuality
 			}
 
@@ -357,7 +386,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				return m, tea.Batch(
 					m.spinner.Tick,
-					startEncoding(m.filePath, m.targetSizeMB, m.targetRes, "", m.trimStart, m.trimEnd, m.customOut, hw, codecCfg, m.progressChan, false, m.qualityLevel),
+					startEncoding(m.filePath, m.targetSizeMB, m.targetRes, "", m.trimStart, m.trimEnd, m.customOut, hw, codecCfg, m.progressChan, false, m.qualityLevel, m.crfLevel),
 					waitForProgress(m.progressChan),
 				)
 			}
@@ -425,9 +454,9 @@ func (m model) View() string {
 		s.WriteString(stepStyle.Render("2. Target Size"))
 		s.WriteString(fmt.Sprintf("\nFile: %s", filepath.Base(m.filePath)))
 		if m.isGifMode {
-			s.WriteString("\nMax MB (GIF), Empty=dontcare:\n\n")
+			s.WriteString("\nMax MB (GIF), Empty=CRF:\n\n")
 		} else {
-			s.WriteString("\nMax MB (Audio+Video), Empty=dontcare:\n\n")
+			s.WriteString("\nMax MB (Audio+Video), Empty=CRF:\n\n")
 		}
 		s.WriteString(m.textInput.View())
 
@@ -446,7 +475,11 @@ func (m model) View() string {
 
 	case stateSelectHW:
 		s.WriteString(stepStyle.Render("4. Select Hardware"))
-		s.WriteString(fmt.Sprintf("\nTarget: %.2f MB\n\n", m.targetSizeMB))
+		if m.targetSizeMB > 0 {
+			s.WriteString(fmt.Sprintf("\nTarget: %.2f MB\n\n", m.targetSizeMB))
+		} else {
+			s.WriteString("\nTarget: CRF\n\n")
+		}
 		for i, hw := range hardwareOptions {
 			cursor := "  "
 			style := itemStyle
@@ -473,8 +506,33 @@ func (m model) View() string {
 			s.WriteString(style.Render(cursor+c.Name) + "\n")
 		}
 
+	case stateSelectCRF:
+		s.WriteString(stepStyle.Render("6. Quality (CRF)"))
+		s.WriteString("\nAdjust the Constant Rate Factor (CRF).")
+		s.WriteString("\n\n")
+
+		sliderWidth := 20
+		pos := m.crfLevel * (sliderWidth / 10)
+		line := ""
+		for i := 0; i <= sliderWidth; i++ {
+			if i == pos {
+				line += "○"
+			} else {
+				line += "━"
+			}
+		}
+
+		estimatedMB := m.originalSize * (0.6 * math.Pow(1.2, float64(5-m.crfLevel)))
+		s.WriteString(fmt.Sprintf("  High Quality  [ %s ]  Smaller File\n", line))
+		s.WriteString(fmt.Sprintf("  Estimated Size: %s\n", selectedItemStyle.Render(fmt.Sprintf("~%.1f MB", estimatedMB))))
+		s.WriteString("\nPress Enter to continue.")
+
 	case stateSelectQuality:
-		s.WriteString(stepStyle.Render("6. Select Quality / Speed"))
+		stepNum := "6"
+		if m.targetSizeMB <= 0 {
+			stepNum = "7"
+		}
+		s.WriteString(stepStyle.Render(stepNum + ". Select Encoding Speed"))
 		s.WriteString("\nUse Left/Right to adjust.")
 		s.WriteString("\n\n")
 
@@ -492,9 +550,10 @@ func (m model) View() string {
 		labels := []string{"Fastest", "Faster", "Balanced (default)", "Better", "Best"}
 		currentLabel := labels[m.qualityLevel]
 
-		s.WriteString(fmt.Sprintf("  Fast  [ %s ]  Quality\n", line))
+		s.WriteString(fmt.Sprintf("  Fast  [ %s ]  Slow\n", line))
 		s.WriteString("  Mode: " + selectedItemStyle.Render(currentLabel))
 		s.WriteString("\n\nPress Enter to start.")
+
 	case stateProcessing:
 		mode := "Compressing"
 		if m.isGifMode {
@@ -565,7 +624,7 @@ func parseDuration(s string) float64 {
 	return sec
 }
 
-func startEncoding(inputFile string, targetMB float64, resInput string, fpsInput string, trimStart, trimEnd, customOut string, hw hwType, codecCfg codecInfo, progressChan chan progressMsg, isGif bool, quality int) tea.Cmd {
+func startEncoding(inputFile string, targetMB float64, resInput string, fpsInput string, trimStart, trimEnd, customOut string, hw hwType, codecCfg codecInfo, progressChan chan progressMsg, isGif bool, quality int, crfSlider int) tea.Cmd {
 	return func() tea.Msg {
 		defer close(progressChan)
 
@@ -685,17 +744,22 @@ func startEncoding(inputFile string, targetMB float64, resInput string, fpsInput
 			}
 		}
 
-		targetBits := targetMB * 8388608 // 8 * 1024 * 1024
-		audioRate := 0.0
-		if hasAudio {
-			audioRate = 128 * 1024
+		isCRFMode := targetMB <= 0
+		var videoKBit int
+
+		if !isCRFMode {
+			targetBits := targetMB * 8388608 // 8 * 1024 * 1024
+			audioRate := 0.0
+			if hasAudio {
+				audioRate = 128 * 1024
+			}
+			totalRate := targetBits / duration
+			videoRate := (totalRate - audioRate) * 0.95
+			if videoRate < 50*1024 {
+				videoRate = 50 * 1024
+			}
+			videoKBit = int(videoRate / 1024)
 		}
-		totalRate := targetBits / duration
-		videoRate := (totalRate - audioRate) * 0.95
-		if videoRate < 50*1024 {
-			videoRate = 50 * 1024
-		}
-		videoKBit := int(videoRate / 1024)
 
 		isCPU := hw == hwCPU
 
@@ -723,90 +787,147 @@ func startEncoding(inputFile string, targetMB float64, resInput string, fpsInput
 			case "libvpx-vp9":
 				vp9Speeds := []string{"8", "7", "6", "4", "1"}
 				extraArgs = append(extraArgs, "-speed", vp9Speeds[quality], "-row-mt", "1", "-tile-columns", "2")
+				if isCRFMode {
+					crf := 20 + int(float64(crfSlider)*2.5) // 20-45
+					extraArgs = append(extraArgs, "-crf", strconv.Itoa(crf), "-b:v", "0")
+				}
 			case "libaom-av1":
 				aomSpeeds := []string{"8", "7", "6", "4", "3"}
 				extraArgs = append(extraArgs, "-cpu-used", aomSpeeds[quality], "-row-mt", "1", "-tiles", "2x2")
+				if isCRFMode {
+					crf := 20 + (crfSlider * 3) // 20-50
+					extraArgs = append(extraArgs, "-crf", strconv.Itoa(crf))
+				}
 			case "libsvtav1":
 				svtPresets := []string{"12", "10", "8", "6", "4"}
 				extraArgs = append(extraArgs, "-preset", svtPresets[quality])
+				if isCRFMode {
+					crf := 20 + (crfSlider * 3) // 20-50
+					extraArgs = append(extraArgs, "-crf", strconv.Itoa(crf))
+				}
 			case "librav1e":
 				ravSpeeds := []string{"10", "8", "6", "4", "2"}
 				extraArgs = append(extraArgs, "-speed", ravSpeeds[quality])
+				if isCRFMode {
+					crf := 60 + (crfSlider * 8) // 60-140
+					extraArgs = append(extraArgs, "-crf", strconv.Itoa(crf))
+				}
 			case "libx264":
 				x264Presets := []string{"ultrafast", "veryfast", "faster", "medium", "veryslow"}
 				extraArgs = append(extraArgs, "-preset", x264Presets[quality])
+				if isCRFMode {
+					crf := 18 + int(float64(crfSlider)*1.5) // 18-33
+					extraArgs = append(extraArgs, "-crf", strconv.Itoa(crf))
+				}
 			case "libx265":
 				x265Presets := []string{"ultrafast", "veryfast", "fast", "medium", "veryslow"}
 				extraArgs = append(extraArgs, "-preset", x265Presets[quality])
+				if isCRFMode {
+					crf := 20 + int(float64(crfSlider)*1.6) // 20-36
+					extraArgs = append(extraArgs, "-crf", strconv.Itoa(crf))
+				}
 			default:
 				extraArgs = append(extraArgs, "-preset", "medium")
 			}
 
-			nullOut := "/dev/null"
-			if runtime.GOOS == "windows" {
-				nullOut = "NUL"
+			if isCRFMode {
+				// single pass (CRF)
+				args := []string{"-y"}
+				args = append(args, trimArgs...)
+				args = append(args, "-i", inputFile, "-c:v", codecCfg.FFmpegLib)
+				args = append(args, extraArgs...)
+				args = append(args, filterArgs...)
+				args = append(args, audioArgs...)
+				args = append(args, formatArgs...)
+				args = append(args, outputFile)
+
+				fullCmd := fmt.Sprintf("ffmpeg %s", strings.Join(args, " "))
+				progressChan <- progressMsg{debugCmd: fullCmd}
+
+				if err := runFFmpeg(args, progressChan, duration, "Encoding (CRF)"); err != nil {
+					return workDoneMsg{err: err}
+				}
+			} else {
+				nullOut := "/dev/null"
+				if runtime.GOOS == "windows" {
+					nullOut = "NUL"
+				}
+
+				// pass 1
+				p1 := []string{"-y"}
+				p1 = append(p1, trimArgs...)
+				p1 = append(p1, "-i", inputFile, "-c:v", codecCfg.FFmpegLib, "-b:v", fmt.Sprintf("%dk", videoKBit), "-pass", "1", "-passlogfile", passLog, "-an")
+				p1 = append(p1, filterArgs...)
+				p1 = append(p1, extraArgs...)
+				p1 = append(p1, "-f", "null", nullOut)
+
+				fullCmd1 := fmt.Sprintf("ffmpeg %s", strings.Join(p1, " "))
+				progressChan <- progressMsg{debugCmd: fullCmd1}
+
+				if err := runFFmpeg(p1, progressChan, duration, "Pass 1 (Analysis)"); err != nil {
+					return workDoneMsg{err: err}
+				}
+
+				// pass 2
+				p2 := []string{"-y"}
+				p2 = append(p2, trimArgs...)
+				p2 = append(p2, "-i", inputFile, "-c:v", codecCfg.FFmpegLib, "-b:v", fmt.Sprintf("%dk", videoKBit), "-pass", "2", "-passlogfile", passLog)
+				p2 = append(p2, filterArgs...)
+				p2 = append(p2, extraArgs...)
+				p2 = append(p2, audioArgs...)
+				p2 = append(p2, formatArgs...)
+				p2 = append(p2, outputFile)
+
+				fullCmd2 := fmt.Sprintf("ffmpeg %s", strings.Join(p2, " "))
+				progressChan <- progressMsg{debugCmd: fullCmd2}
+
+				if err := runFFmpeg(p2, progressChan, duration, "Pass 2 (Encoding)"); err != nil {
+					return workDoneMsg{err: err}
+				}
+				_ = os.Remove(passLog + "-0.log")
+				_ = os.Remove(passLog + ".log")
+				_ = os.Remove(passLog + "-0.log.mbtree")
 			}
-
-			// pass 1
-			p1 := []string{"-y"}
-			p1 = append(p1, trimArgs...)
-			p1 = append(p1, "-i", inputFile, "-c:v", codecCfg.FFmpegLib, "-b:v", fmt.Sprintf("%dk", videoKBit), "-pass", "1", "-passlogfile", passLog, "-an")
-			p1 = append(p1, filterArgs...)
-			p1 = append(p1, extraArgs...)
-			p1 = append(p1, "-f", "null", nullOut)
-
-			fullCmd1 := fmt.Sprintf("ffmpeg %s", strings.Join(p1, " "))
-			progressChan <- progressMsg{debugCmd: fullCmd1}
-
-			if err := runFFmpeg(p1, progressChan, duration, "Pass 1 (Analysis)"); err != nil {
-				return workDoneMsg{err: err}
-			}
-
-			// pass 2
-			p2 := []string{"-y"}
-			p2 = append(p2, trimArgs...)
-			p2 = append(p2, "-i", inputFile, "-c:v", codecCfg.FFmpegLib, "-b:v", fmt.Sprintf("%dk", videoKBit), "-pass", "2", "-passlogfile", passLog)
-			p2 = append(p2, filterArgs...)
-			p2 = append(p2, extraArgs...)
-			p2 = append(p2, audioArgs...)
-			p2 = append(p2, formatArgs...)
-			p2 = append(p2, outputFile)
-
-			fullCmd2 := fmt.Sprintf("ffmpeg %s", strings.Join(p2, " "))
-			progressChan <- progressMsg{debugCmd: fullCmd2}
-
-			if err := runFFmpeg(p2, progressChan, duration, "Pass 2 (Encoding)"); err != nil {
-				return workDoneMsg{err: err}
-			}
-			_ = os.Remove(passLog + "-0.log")
-			_ = os.Remove(passLog + ".log")
-			_ = os.Remove(passLog + "-0.log.mbtree")
 
 		} else {
 			extraArgs := []string{"-pix_fmt", "yuv420p"}
+			hwQuality := 19 + int(float64(crfSlider)*1.5) // 19-34
+
 			if strings.Contains(codecCfg.FFmpegLib, "nvenc") {
 				nvPresets := []string{"p1", "p2", "p4", "p6", "p7"}
-				extraArgs = append(extraArgs, "-preset", nvPresets[quality], "-rc", "vbr", "-cq", "0")
+				extraArgs = append(extraArgs, "-preset", nvPresets[quality])
+				if isCRFMode {
+					extraArgs = append(extraArgs, "-rc", "vbr", "-cq", strconv.Itoa(hwQuality))
+				} else {
+					extraArgs = append(extraArgs, "-rc", "vbr", "-cq", "0")
+				}
 			} else if strings.Contains(codecCfg.FFmpegLib, "amf") {
 				amfPresets := []string{"speed", "speed", "balanced", "quality", "quality"}
 				if strings.Contains(codecCfg.FFmpegLib, "av1") {
 					amfPresets = []string{"speed", "balanced", "quality", "high_quality", "high_quality"}
 				}
 				extraArgs = append(extraArgs, "-quality", amfPresets[quality])
+				if isCRFMode {
+					extraArgs = append(extraArgs, "-rc", "cqp", "-qp_i", strconv.Itoa(hwQuality), "-qp_p", strconv.Itoa(hwQuality))
+				}
 			} else if strings.Contains(codecCfg.FFmpegLib, "qsv") {
 				qsvPresets := []string{"veryfast", "faster", "balanced", "slow", "veryslow"}
 				extraArgs = append(extraArgs, "-preset", qsvPresets[quality])
+				if isCRFMode {
+					extraArgs = append(extraArgs, "-global_quality", strconv.Itoa(hwQuality))
+				}
 			}
 
 			cmdArgs := []string{"-y", "-hwaccel", "auto"}
 			cmdArgs = append(cmdArgs, trimArgs...)
-			cmdArgs = append(cmdArgs,
-				"-i", inputFile,
-				"-c:v", codecCfg.FFmpegLib,
-				"-b:v", fmt.Sprintf("%dk", videoKBit),
-				"-maxrate", fmt.Sprintf("%dk", videoKBit),
-				"-bufsize", fmt.Sprintf("%dk", videoKBit*2),
-			)
+			cmdArgs = append(cmdArgs, "-i", inputFile, "-c:v", codecCfg.FFmpegLib)
+			if !isCRFMode {
+				cmdArgs = append(cmdArgs,
+					"-b:v", fmt.Sprintf("%dk", videoKBit),
+					"-maxrate", fmt.Sprintf("%dk", videoKBit),
+					"-bufsize", fmt.Sprintf("%dk", videoKBit*2),
+				)
+			}
 			cmdArgs = append(cmdArgs, filterArgs...)
 			cmdArgs = append(cmdArgs, extraArgs...)
 			cmdArgs = append(cmdArgs, audioArgs...)
