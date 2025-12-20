@@ -38,6 +38,13 @@ var (
 
 	progressFullStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#5865F2"))
 	progressEmptyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+
+	cmdBoxStyle = lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("240")).
+			Padding(0, 1).
+			Foreground(lipgloss.Color("245")).
+			Width(78)
 )
 
 type state int
@@ -49,6 +56,7 @@ const (
 	stateGifFPS
 	stateSelectHW
 	stateSelectCodec
+	stateSelectQuality
 	stateProcessing
 	stateDone
 	stateError
@@ -73,7 +81,9 @@ type codecInfo struct {
 
 var encoderMap = map[hwType][]codecInfo{
 	hwCPU: {
-		{"AV1 (Slowest, Best Quality)", "libaom-av1", ".webm"},
+		{"AV1 (SVT-AV1, Balanced, Recommended)", "libsvtav1", ".webm"},
+		{"AV1 (AOM, Reference/Slow)", "libaom-av1", ".webm"},
+		{"AV1 (rav1e)", "librav1e", ".webm"},
 		{"VP9 (Medium Quality)", "libvpx-vp9", ".webm"},
 		{"H.264 (Fast)", "libx264", ".mp4"},
 		{"H.265 (High Efficiency)", "libx265", ".mp4"},
@@ -99,6 +109,7 @@ var encoderMap = map[hwType][]codecInfo{
 type progressMsg struct {
 	line     string
 	progress float64
+	debugCmd string
 }
 
 type workDoneMsg struct {
@@ -114,6 +125,8 @@ type model struct {
 	err       error
 
 	isGifMode bool
+	verbose   bool
+	customOut string
 
 	filePath      string
 	targetSizeMB  float64
@@ -123,9 +136,11 @@ type model struct {
 	trimEnd       string
 	selectedHW    int
 	selectedCodec int
+	qualityLevel  int // 0 to 4
 
 	progressChan chan progressMsg
 	currentLog   string
+	currentCmd   string
 	percent      float64
 	outputFile   string
 	finalSize    string
@@ -145,10 +160,11 @@ func initialModel(gifMode bool) model {
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 
 	m := model{
-		state:      stateInputFile,
-		spinner:    s,
-		selectedHW: 0,
-		isGifMode:  gifMode,
+		state:        stateInputFile,
+		spinner:      s,
+		selectedHW:   0,
+		qualityLevel: 2, // balanced
+		isGifMode:    gifMode,
 	}
 
 	args := os.Args[1:]
@@ -160,6 +176,17 @@ func initialModel(gifMode bool) model {
 		}
 		if arg == "-gif" {
 			continue
+		}
+		if arg == "-v" {
+			m.verbose = true
+			continue
+		}
+		if arg == "-o" {
+			if i+1 < len(args) {
+				m.customOut = args[i+1]
+				skip = 1
+				continue
+			}
 		}
 		if arg == "-trim" {
 			if i+2 < len(args) {
@@ -273,7 +300,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				codecCfg := codecInfo{Name: "GIF", Ext: ".gif"}
 				return m, tea.Batch(
 					m.spinner.Tick,
-					startEncoding(m.filePath, m.targetSizeMB, m.targetRes, m.targetFPS, m.trimStart, m.trimEnd, hwCPU, codecCfg, m.progressChan, true),
+					startEncoding(m.filePath, m.targetSizeMB, m.targetRes, m.targetFPS, m.trimStart, m.trimEnd, m.customOut, hwCPU, codecCfg, m.progressChan, true, m.qualityLevel),
 					waitForProgress(m.progressChan),
 				)
 			}
@@ -307,14 +334,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selectedCodec++
 				}
 			case "enter":
+				m.state = stateSelectQuality
+			}
+
+		case stateSelectQuality:
+			switch msg.String() {
+			case "left", "h", "a":
+				if m.qualityLevel > 0 {
+					m.qualityLevel--
+				}
+			case "right", "l", "d":
+				if m.qualityLevel < 4 {
+					m.qualityLevel++
+				}
+			case "enter":
+				hw := hardwareOptions[m.selectedHW]
+				options := encoderMap[hw]
+				codecCfg := options[m.selectedCodec]
+
 				m.state = stateProcessing
 				m.progressChan = make(chan progressMsg)
 
-				codecCfg := options[m.selectedCodec]
-
 				return m, tea.Batch(
 					m.spinner.Tick,
-					startEncoding(m.filePath, m.targetSizeMB, m.targetRes, "", m.trimStart, m.trimEnd, hw, codecCfg, m.progressChan, false),
+					startEncoding(m.filePath, m.targetSizeMB, m.targetRes, "", m.trimStart, m.trimEnd, m.customOut, hw, codecCfg, m.progressChan, false, m.qualityLevel),
 					waitForProgress(m.progressChan),
 				)
 			}
@@ -324,6 +367,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.currentLog = msg.line
 		if msg.progress > 0 {
 			m.percent = msg.progress
+		}
+		if msg.debugCmd != "" {
+			m.currentCmd = msg.debugCmd
 		}
 		return m, waitForProgress(m.progressChan)
 
@@ -427,6 +473,28 @@ func (m model) View() string {
 			s.WriteString(style.Render(cursor+c.Name) + "\n")
 		}
 
+	case stateSelectQuality:
+		s.WriteString(stepStyle.Render("6. Select Quality / Speed"))
+		s.WriteString("\nUse Left/Right to adjust.")
+		s.WriteString("\n\n")
+
+		sliderWidth := 20
+		pos := m.qualityLevel * (sliderWidth / 4)
+		line := ""
+		for i := 0; i <= sliderWidth; i++ {
+			if i == pos {
+				line += "○"
+			} else {
+				line += "━"
+			}
+		}
+
+		labels := []string{"Fastest", "Faster", "Balanced (default)", "Better", "Best"}
+		currentLabel := labels[m.qualityLevel]
+
+		s.WriteString(fmt.Sprintf("  Fast  [ %s ]  Quality\n", line))
+		s.WriteString("  Mode: " + selectedItemStyle.Render(currentLabel))
+		s.WriteString("\n\nPress Enter to start.")
 	case stateProcessing:
 		mode := "Compressing"
 		if m.isGifMode {
@@ -442,6 +510,11 @@ func (m model) View() string {
 
 		s.WriteString(fmt.Sprintf("%s %s  %.0f%%\n\n", m.spinner.View(), bar, m.percent*100))
 		s.WriteString(lipgloss.NewStyle().Faint(true).Render("Status: " + m.currentLog))
+
+		if m.verbose && m.currentCmd != "" {
+			s.WriteString("\n\n")
+			s.WriteString(cmdBoxStyle.Render(lipgloss.NewStyle().Width(76).Render(m.currentCmd)))
+		}
 
 	case stateDone:
 		s.WriteString(doneStyle.Render("Success!"))
@@ -492,7 +565,7 @@ func parseDuration(s string) float64 {
 	return sec
 }
 
-func startEncoding(inputFile string, targetMB float64, resInput string, fpsInput string, trimStart, trimEnd string, hw hwType, codecCfg codecInfo, progressChan chan progressMsg, isGif bool) tea.Cmd {
+func startEncoding(inputFile string, targetMB float64, resInput string, fpsInput string, trimStart, trimEnd, customOut string, hw hwType, codecCfg codecInfo, progressChan chan progressMsg, isGif bool, quality int) tea.Cmd {
 	return func() tea.Msg {
 		defer close(progressChan)
 
@@ -512,9 +585,23 @@ func startEncoding(inputFile string, targetMB float64, resInput string, fpsInput
 			}
 		}
 
-		dir := filepath.Dir(inputFile)
-		name := strings.TrimSuffix(filepath.Base(inputFile), filepath.Ext(inputFile))
-		outputFile := filepath.Join(dir, fmt.Sprintf("%s_compressed%s", name, codecCfg.Ext))
+		var outputFile string
+		var formatArgs []string
+
+		if customOut != "" {
+			outputFile = customOut
+			fmtFlag := strings.TrimPrefix(codecCfg.Ext, ".")
+			formatArgs = []string{"-f", fmtFlag}
+		} else {
+			dir := filepath.Dir(inputFile)
+			name := strings.TrimSuffix(filepath.Base(inputFile), filepath.Ext(inputFile))
+			outputFile = filepath.Join(dir, fmt.Sprintf("%s_compressed%s", name, codecCfg.Ext))
+		}
+
+		// allow streaming
+		if codecCfg.Ext == ".mp4" {
+			formatArgs = append(formatArgs, "-movflags", "+faststart")
+		}
 
 		scaleFilter := buildScaleFilter(resInput)
 
@@ -575,8 +662,12 @@ func startEncoding(inputFile string, targetMB float64, resInput string, fpsInput
 			encArgs = append(encArgs,
 				"-i", inputFile, "-i", paletteFile,
 				"-lavfi", filterComplex,
-				outputFile,
 			)
+			encArgs = append(encArgs, formatArgs...)
+			encArgs = append(encArgs, outputFile)
+
+			fullCmd := fmt.Sprintf("ffmpeg %s", strings.Join(encArgs, " "))
+			progressChan <- progressMsg{debugCmd: fullCmd}
 
 			if err := runFFmpeg(encArgs, progressChan, duration, "GIF Encode"); err != nil {
 				return workDoneMsg{err: err}
@@ -627,16 +718,28 @@ func startEncoding(inputFile string, targetMB float64, resInput string, fpsInput
 		if isCPU {
 			passLog := filepath.Join(os.TempDir(), fmt.Sprintf("pass_%d", time.Now().UnixNano()))
 
-			extraArgs := []string{}
+			extraArgs := []string{"-pix_fmt", "yuv420p"}
 			switch codecCfg.FFmpegLib {
 			case "libvpx-vp9":
-				extraArgs = []string{"-speed", "4", "-row-mt", "1", "-tile-columns", "2"}
+				vp9Speeds := []string{"8", "7", "6", "4", "1"}
+				extraArgs = append(extraArgs, "-speed", vp9Speeds[quality], "-row-mt", "1", "-tile-columns", "2")
 			case "libaom-av1":
-				extraArgs = []string{"-cpu-used", "6", "-row-mt", "1", "-tiles", "2x2"}
+				aomSpeeds := []string{"8", "7", "6", "4", "3"}
+				extraArgs = append(extraArgs, "-cpu-used", aomSpeeds[quality], "-row-mt", "1", "-tiles", "2x2")
+			case "libsvtav1":
+				svtPresets := []string{"12", "10", "8", "6", "4"}
+				extraArgs = append(extraArgs, "-preset", svtPresets[quality])
+			case "librav1e":
+				ravSpeeds := []string{"10", "8", "6", "4", "2"}
+				extraArgs = append(extraArgs, "-speed", ravSpeeds[quality])
 			case "libx264":
-				extraArgs = []string{"-preset", "slow"}
+				x264Presets := []string{"ultrafast", "veryfast", "faster", "medium", "veryslow"}
+				extraArgs = append(extraArgs, "-preset", x264Presets[quality])
+			case "libx265":
+				x265Presets := []string{"ultrafast", "veryfast", "fast", "medium", "veryslow"}
+				extraArgs = append(extraArgs, "-preset", x265Presets[quality])
 			default:
-				extraArgs = []string{"-preset", "medium"}
+				extraArgs = append(extraArgs, "-preset", "medium")
 			}
 
 			nullOut := "/dev/null"
@@ -652,6 +755,9 @@ func startEncoding(inputFile string, targetMB float64, resInput string, fpsInput
 			p1 = append(p1, extraArgs...)
 			p1 = append(p1, "-f", "null", nullOut)
 
+			fullCmd1 := fmt.Sprintf("ffmpeg %s", strings.Join(p1, " "))
+			progressChan <- progressMsg{debugCmd: fullCmd1}
+
 			if err := runFFmpeg(p1, progressChan, duration, "Pass 1 (Analysis)"); err != nil {
 				return workDoneMsg{err: err}
 			}
@@ -663,7 +769,11 @@ func startEncoding(inputFile string, targetMB float64, resInput string, fpsInput
 			p2 = append(p2, filterArgs...)
 			p2 = append(p2, extraArgs...)
 			p2 = append(p2, audioArgs...)
+			p2 = append(p2, formatArgs...)
 			p2 = append(p2, outputFile)
+
+			fullCmd2 := fmt.Sprintf("ffmpeg %s", strings.Join(p2, " "))
+			progressChan <- progressMsg{debugCmd: fullCmd2}
 
 			if err := runFFmpeg(p2, progressChan, duration, "Pass 2 (Encoding)"); err != nil {
 				return workDoneMsg{err: err}
@@ -673,13 +783,15 @@ func startEncoding(inputFile string, targetMB float64, resInput string, fpsInput
 			_ = os.Remove(passLog + "-0.log.mbtree")
 
 		} else {
-			extraArgs := []string{}
+			extraArgs := []string{"-pix_fmt", "yuv420p"}
 			if strings.Contains(codecCfg.FFmpegLib, "nvenc") {
-				extraArgs = []string{"-preset", "p7", "-rc", "vbr", "-cq", "0"}
+				nvPresets := []string{"p1", "p2", "p4", "p6", "p7"}
+				extraArgs = append(extraArgs, "-preset", nvPresets[quality], "-rc", "vbr", "-cq", "0")
 			} else if strings.Contains(codecCfg.FFmpegLib, "amf") {
-				extraArgs = []string{"-quality", "quality"}
+				extraArgs = append(extraArgs, "-quality", "quality")
 			} else if strings.Contains(codecCfg.FFmpegLib, "qsv") {
-				extraArgs = []string{"-preset", "veryslow"}
+				qsvPresets := []string{"veryfast", "faster", "balanced", "slow", "veryslow"}
+				extraArgs = append(extraArgs, "-preset", qsvPresets[quality])
 			}
 
 			cmdArgs := []string{"-y", "-hwaccel", "auto"}
@@ -694,7 +806,11 @@ func startEncoding(inputFile string, targetMB float64, resInput string, fpsInput
 			cmdArgs = append(cmdArgs, filterArgs...)
 			cmdArgs = append(cmdArgs, extraArgs...)
 			cmdArgs = append(cmdArgs, audioArgs...)
+			cmdArgs = append(cmdArgs, formatArgs...)
 			cmdArgs = append(cmdArgs, outputFile)
+
+			fullCmd := fmt.Sprintf("ffmpeg %s", strings.Join(cmdArgs, " "))
+			progressChan <- progressMsg{debugCmd: fullCmd}
 
 			if err := runFFmpeg(cmdArgs, progressChan, duration, "GPU Encoding"); err != nil {
 				return workDoneMsg{err: err}
@@ -826,6 +942,8 @@ func printHelp() {
 	fmt.Println("  teacrush [input_file] [flags]")
 	fmt.Println("\nFlags:")
 	fmt.Println("  -gif                Encode to GIF")
+	fmt.Println("  -o [file]           Output file path")
+	fmt.Println("  -v                  Verbose mode (show command)")
 	fmt.Println("  -trim [start] [end] Trim video (e.g. -trim 00:01:00 00:02:00 or -trim 1s 5s)")
 	fmt.Println("  -h, --help, ?       Show this help message")
 }

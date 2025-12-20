@@ -29,6 +29,8 @@ Usage:
 
 Flags:
   -gif                Encode to GIF
+  -o [file]           Output file path
+  -v                  Verbose mode (show command)
   -trim [start] [end] Trim video (e.g. -trim 00:01:00 00:02:00 or -trim 1s 5s)
   -h, --help, ?       Show this help message
 ```
